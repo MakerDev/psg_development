@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import random
 from datetime import datetime
 
 from .models.cnn_encoders import *
@@ -10,7 +9,8 @@ from .utils.tools import *
 from .prep_window_wise import epoching_from_time
 from .utils.post_process import run_postprocess
 
-from .ProgNoti import ProgNoti
+from common.prog_noti import ProgNoti
+from common.seed import set_seed
 
 
 class SleepFinal :
@@ -144,12 +144,7 @@ class SleepFinal :
         transforms = ["NormaliseOnly"]
         transforms = build_transforms(transforms, n_channels=self.num_channels)
 
-        torch.manual_seed(self.seed)
-        np.random.seed(self.seed)
-        torch.cuda.manual_seed_all(self.seed)
-        random.seed(self.seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        set_seed(self.seed)
 
 
         # 채널 순서 배치 : 여기서 누락 채널 체크 추가 필요

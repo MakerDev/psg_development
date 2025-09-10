@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import random
 import os
 import sys
 sys.path.append('/home/honeynaps/data/shared/arousal')
@@ -11,11 +10,12 @@ from datetime import datetime
 # from prep_spectrogram import make_spectrogram
 from utils.transforms import build_transforms
 from utils.tools import pad_signals
-from utils.eval_helper import find_events, combine_two_models_events
+from common.eval_utils import find_events, combine_two_models_events
 from models.DeepSleepSota import DeepSleepNetSota
 from models.DeepSleepAttn2D import DeepSleepAttn2D
 from prep_spectrogram_tech import make_spectrogram, robust_scale
-from ProgNoti import ProgNoti
+from common.prog_noti import ProgNoti
+from common.seed import set_seed
 
 
 class ArousalFinal :
@@ -285,12 +285,7 @@ class ArousalFinal :
         transforms = build_transforms(transforms, n_channels=self.num_channels)
         prep_fn = robust_scale
 
-        torch.manual_seed(self.seed)
-        np.random.seed(self.seed)
-        torch.cuda.manual_seed_all(self.seed)
-        random.seed(self.seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        set_seed(self.seed)
 
         # 채널 순서 배치 : 여기서 누락 채널 체크 추가 필요
         SID_SEQs = ['F3_2', 'F4_1', 'C3_2', 'C4_1', 'O1_2', 'O2_1', 'LOC', 'ROC', 'CHIN' ]

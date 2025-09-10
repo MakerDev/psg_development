@@ -80,10 +80,11 @@ def get_y_sleep_stage(y_sleep, start, end):
 def compare_events_without_conf(
     gt_events,      # list of (gt_start, gt_end)
     pred_events,    # list of (pred_start, pred_end, avg_prob)
-    overlap_ratio_th=0.1
+    overlap_ratio_th=0.1,
+    sfreq=50
 ):
     df_gt_columns = [
-        "gt_idx", "gt_len", 
+        "gt_idx", "gt_len", "pred_start", "pred_end", "gt_start", "gt_end",
         "overlap_YN", "overlap_ratio",
         "front_overhang", "back_overhang",
         "front_underhang", "back_underhang",
@@ -124,21 +125,29 @@ def compare_events_without_conf(
 
             row = {
                 "gt_idx": i,
-                "gt_len": gt_len / 50,
+                "gt_len": gt_len / sfreq,
+                "pred_start": ps,
+                "pred_end": pe,
+                "gt_start": gt_s,
+                "gt_end": gt_e,
                 "overlap_YN": "Y",
                 "overlap_ratio": best_ratio,
-                "front_overhang": front_overhang / 50,
-                "back_overhang": back_overhang / 50,
-                "front_underhang": front_underhang / 50,
-                "back_underhang": back_underhang / 50,
-                "pred_len": pred_len / 50,
+                "front_overhang": front_overhang / sfreq,
+                "back_overhang": back_overhang / sfreq,
+                "front_underhang": front_underhang / sfreq,
+                "back_underhang": back_underhang / sfreq,
+                "pred_len": pred_len / sfreq,
                 "stage_pred": get_y_sleep_stage(None, ps, pe),
                 "stage_gt": get_y_sleep_stage(None, gt_s, gt_e)
             }
         else:
             row = {
                 "gt_idx": i,
-                "gt_len": gt_len / 50,
+                "gt_len": gt_len / sfreq,
+                "pred_start": 0,
+                "pred_end": 0,
+                "gt_start": gt_s,
+                "gt_end": gt_e,
                 "overlap_YN": "N",
                 "overlap_ratio": 0.0,
                 "front_overhang": 0,
@@ -146,7 +155,7 @@ def compare_events_without_conf(
                 "front_underhang": 0,
                 "back_underhang": 0,
                 "pred_len": 0,
-                "stage_pred": get_y_sleep_stage(None, ps, pe),
+                "stage_pred": 0,
                 "stage_gt": get_y_sleep_stage(None, gt_s, gt_e)
             }
         gt_rows.append(row)
@@ -158,15 +167,17 @@ def compare_events_without_conf(
         if j not in used_pred_indices:
             pred_len = (pe - ps + 1)
             unmatched.append({
+                "pred_start": ps,
+                "pred_end": pe,
                 "pred_idx": j,
-                "pred_len": pred_len / 50,
+                "gt_start": 0,
+                "gt_end": 0,
+                "pred_len": pred_len / sfreq,
                 "stage": get_y_sleep_stage(None, ps, pe)
             })
-    df_unmatched = pd.DataFrame(unmatched, columns=["pred_idx","pred_len", "stage"])
+    df_unmatched = pd.DataFrame(unmatched, columns=["pred_start", "pred_end", "pred_idx", "gt_start", "gt_end", "pred_len", "stage"])
 
     return df_gt, df_unmatched
-
-
 
 
 
@@ -174,7 +185,8 @@ def compare_events_with_conf(
     gt_events,      # list of (gt_start, gt_end)
     pred_events,    # list of (pred_start, pred_end, avg_prob)
     y_sleep=None,
-    overlap_ratio_th=0.1
+    overlap_ratio_th=0.1,
+    sfreq=50
 ):
     df_gt_columns = [
         "gt_idx", "gt_len", 
@@ -218,14 +230,14 @@ def compare_events_with_conf(
 
             row = {
                 "gt_idx": i,
-                "gt_len": gt_len / 50,
+                "gt_len": gt_len / sfreq,
                 "overlap_YN": "Y",
                 "overlap_ratio": best_ratio,
-                "front_overhang": front_overhang / 50,
-                "back_overhang": back_overhang / 50,
-                "front_underhang": front_underhang / 50,
-                "back_underhang": back_underhang / 50,
-                "pred_len": pred_len / 50,
+                "front_overhang": front_overhang / sfreq,
+                "back_overhang": back_overhang / sfreq,
+                "front_underhang": front_underhang / sfreq,
+                "back_underhang": back_underhang / sfreq,
+                "pred_len": pred_len / sfreq,
                 "pred_conf": f"{pconf:.3f}",
                 "stage_pred": get_y_sleep_stage(y_sleep, ps, pe),
                 "stage_gt": get_y_sleep_stage(y_sleep, gt_s, gt_e)
@@ -234,7 +246,7 @@ def compare_events_with_conf(
             # overlap N
             row = {
                 "gt_idx": i,
-                "gt_len": gt_len / 50,
+                "gt_len": gt_len / sfreq,
                 "overlap_YN": "N",
                 "overlap_ratio": 0.0,
                 "front_overhang": 0,
@@ -256,7 +268,7 @@ def compare_events_with_conf(
             pred_len = (pe - ps + 1)
             unmatched.append({
                 "pred_idx": j,
-                "pred_len": pred_len / 50,
+                "pred_len": pred_len / sfreq,
                 "pred_conf": f"{pconf:.3f}",
                 "stage": get_y_sleep_stage(y_sleep, ps, pe)
             })
@@ -272,73 +284,25 @@ def export_two_sheets_to_excel(df_gt, df_unmatched, excel_path="results.xlsx"):
         df_unmatched.to_excel(writer, sheet_name="Pred_Unmatched", index=False)
 
 
-def find_predicted_events(y_pred, y_target, overlap_th=0.1):
-    pred_events = find_events(y_pred)
-    gt_events = find_events(y_target)
-
-    for i, pred_event in enumerate(pred_events):
-        # print event length
-        print(f"{(pred_event[1] - pred_event[0])//50} sec", end = ' ')
-        if i % 10 == 0:
-            print()
-    print()
-    used_pred_indices = set()
-
-    fp_events, fn_events, tp_events = [], [], []
-    for i, row in enumerate(gt_events):
-        gt_s, gt_e = row
-        gt_len = (gt_e - gt_s + 1)
-
-        best_ratio = 0.0
-        best_pred_idx = None
-        best_pred_event = None
-        for j, (ps, pe) in enumerate(pred_events):
-            pred_len = (pe - ps + 1)
-            overlap_s = max(gt_s, ps)
-            overlap_e = min(gt_e, pe)
-            overlap_len = max(0, overlap_e - overlap_s + 1)
-            ratio = overlap_len / gt_len
-
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_pred_idx = j
-                best_pred_event = (ps, pe, pred_len)
-
-        if best_pred_event is not None and best_ratio >= overlap_th:
-            used_pred_indices.add(best_pred_idx)
-            (ps, pe, pred_len) = best_pred_event
-            tp_events.append((ps, pe))
-        else:
-            fn_events.append((gt_s, gt_e))
-
-
-    for j, row in enumerate(pred_events):
-        if j not in used_pred_indices:
-            ps, pe = row
-            fp_events.append((ps, pe))
-
-    return fp_events, fn_events, tp_events
-
-
-def event_level_analysis(y_pred, y_target, y_prob=None, excel_path=None, overlap_th=0.1, return_stats=False, y_sleep=None, verbose=False):
+def event_level_analysis(y_pred, y_target, y_prob=None, excel_path=None, sfreq=50, overlap_th=0.1, return_stats=False, y_sleep=None, verbose=False):
     gt_events = find_events(y_target)
 
     if y_prob is None:
         pred_events = find_events(y_pred)
         df_gt, df_unmatched = compare_events_without_conf(
-            gt_events, pred_events, overlap_ratio_th=overlap_th, y_sleep=y_sleep
+            gt_events, pred_events, overlap_ratio_th=overlap_th, sfreq=sfreq
         )
     else:
         pred_events = find_events_with_confidence(y_pred, y_prob)
 
         df_gt, df_unmatched = compare_events_with_conf(
-            gt_events, pred_events, overlap_ratio_th=overlap_th, y_sleep=y_sleep
+            gt_events, pred_events, overlap_ratio_th=overlap_th, sfreq=sfreq, y_sleep=y_sleep
         )
 
     if verbose:
         for i, pred_event in enumerate(pred_events):
             # print event length
-            print(f"{(pred_event[1] - pred_event[0])//50} sec", end = ' ')
+            print(f"{(pred_event[1] - pred_event[0])//sfreq} sec", end = ' ')
             if i % 10 == 0:
                 print()
         print()
@@ -379,16 +343,22 @@ def event_level_analysis(y_pred, y_target, y_prob=None, excel_path=None, overlap
     for _, row in df_unmatched.iterrows():
         fp_events.append(row)              # FP
 
-    # matched_only = np.zeros_like(y_pred, dtype=y_pred.dtype)
-    # for row in tp_events:
-    #     ps, pe = int(row["pred_start"]), int(row["pred_end"])
-    #     matched_only[ps:pe+1] = y_pred[ps:pe+1]   # 보통 1로 채워짐
+    matched_only = np.zeros_like(y_pred, dtype=y_pred.dtype)
+    for row in tp_events:
+        ps, pe = int(row["pred_start"]), int(row["pred_end"])
+        matched_only[ps:pe+1] = y_pred[ps:pe+1]   # 보통 1로 채워짐
 
-    # missed_only = np.zeros_like(y_target, dtype=y_target.dtype)
-    # for row in fn_events:
-    #     gs, ge = int(row["gt_start"]), int(row["gt_end"])
-    #     missed_only[gs:ge+1] = y_target[gs:ge+1]  # 1 유지  
-    # matched_pred_count = len(pred_events) - n_events_unmatched
+    missed_only = np.zeros_like(y_target, dtype=y_target.dtype)
+    for row in fn_events:
+        gs, ge = int(row["gt_start"]), int(row["gt_end"])
+        missed_only[gs:ge+1] = y_target[gs:ge+1]  # 1 유지  
+
+    wrong_only = np.zeros_like(y_pred, dtype=y_pred.dtype)
+    for row in fp_events:
+        ps, pe = int(row["pred_start"]), int(row["pred_end"])
+        wrong_only[ps:pe+1] = y_pred[ps:pe+1]
+
+    matched_pred_count = len(pred_events) - n_events_unmatched
 
     if return_stats:
         return {
@@ -401,9 +371,10 @@ def event_level_analysis(y_pred, y_target, y_prob=None, excel_path=None, overlap
             "avg_back_overhang": avg_back_over,
             "avg_front_underhang": avg_front_under,
             "avg_back_underhang": avg_back_under,
-            # "matched_pred_ratio": matched_pred_count / len(pred_events),
-            # "matched_only": matched_only,
-            # "missed_only": missed_only,
+            "matched_pred_ratio": matched_pred_count / len(pred_events) if len(pred_events) > 0 else 0,
+            "matched_only": matched_only,
+            "missed_only": missed_only,
+            "wrong_only": wrong_only,
         }
 
     return gt_events, pred_events, n_events_found, n_events_missed, n_events_unmatched

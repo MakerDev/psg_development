@@ -10,7 +10,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ArousalFinal import ArousalFinal
-from ProgNoti import ProgNoti
+from common.prog_noti import ProgNoti
 
 
 class TestArousalFinal:

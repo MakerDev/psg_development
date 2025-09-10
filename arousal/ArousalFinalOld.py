@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import random
 import os
 from datetime import datetime
 
@@ -11,8 +10,9 @@ from models.DeepSleepSota import DeepSleepNetSota
 from models.DeepSleepSota2D import DeepSleepSota2D
 from prep_arousal_ver3 import moving_window_mean_rms_norm
 from prep_spectrogram import make_spectrogram
-from ProgNoti import ProgNoti
-from utils.eval_helper import find_events, combine_two_models_events
+from common.seed import set_seed
+from common.prog_noti import ProgNoti
+from common.eval_utils import find_events, combine_two_models_events
 
 
 class ArousalFinal :
@@ -270,12 +270,7 @@ class ArousalFinal :
         transforms = build_transforms(transforms, n_channels=self.num_channels)
         prep_fn = moving_window_mean_rms_norm
 
-        torch.manual_seed(self.seed)
-        np.random.seed(self.seed)
-        torch.cuda.manual_seed_all(self.seed)
-        random.seed(self.seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        set_seed(self.seed)
 
         # 채널 순서 배치 : 여기서 누락 채널 체크 추가 필요
         SID_SEQs = ['F3_2', 'F4_1', 'C3_2', 'C4_1', 'O1_2', 'O2_1', 'LOC', 'ROC', 'CHIN' ]

@@ -6,7 +6,6 @@ from datetime import datetime
 import datetime as dt
 
 from .iofiles import edf as edf_io
-from .iofiles import xml as xml_io
 from .iofiles.config import *
 
 class DataSet:
