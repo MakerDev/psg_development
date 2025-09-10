@@ -15,6 +15,7 @@ from models.DeepSleepNet1 import *
 from models.DeepSleepSota import DeepSleepNetSota
 from utils.transforms import *
 
+from common.seed import set_seed
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -110,11 +111,7 @@ if __name__ == '__main__':
     parser.add_argument('--tag', type=str, default='')
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False   
+    set_seed(args.seed)
 
     if args.mix_db:
         dataset_dirs = [f"/home/honeynaps/data/dataset/PICKLE/AROUSAL_VER{args.ver}_{args.freq}_PAD",

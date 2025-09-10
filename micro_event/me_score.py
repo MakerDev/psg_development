@@ -8,7 +8,7 @@ from datasets.dataset_hn_pred import SleepEventDatasetEBX
 from sklearn.metrics import precision_recall_curve, average_precision_score, precision_recall_fscore_support
 from losses import masked_focal_loss, CustomASLLossBinary
 from postprocess.postprocessor import evaluate_edf, merge_and_prune, postprocess_preds
-from util.eval_helper import event_level_analysis
+from common.eval_utils import event_level_analysis
 from util.tools import save_micro_events_by_channels, save_micro_events_by_channels_and_type
 
 def str2bool(v):

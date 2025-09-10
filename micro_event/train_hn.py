@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-import random
 import os
 
 from models.crop_models import REDv2Time, REDv2CWT1D
@@ -13,6 +12,7 @@ from datasets.dataset_hn_mc import SleepEventDatasetEBXMC
 from sklearn.metrics import precision_recall_curve, average_precision_score, precision_recall_fscore_support
 from losses import masked_focal_loss, CustomASLLossBinary
 from postprocess.postprocessor import upsample_preds, postprocess_preds_by_length
+from common.seed import set_seed
 from torch.utils.data import WeightedRandomSampler
 from tqdm import tqdm
 
@@ -103,11 +103,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    set_seed(args.seed)
 
 
     data_dir = "/home/honeynaps/data/HN_DATA_MW"  

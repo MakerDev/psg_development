@@ -5,7 +5,7 @@ import sys
 sys.path.append("/home/honeynaps/data/eis/SEED_pytorch")
 
 from util.tools import save_micro_events_by_channels
-from util.eval_helper import event_level_analysis
+from common.eval_utils import event_level_analysis
 from datetime import datetime
 from scipy.signal import peak_prominences, hilbert, butter, filtfilt, find_peaks, savgol_filter
 from scipy.stats import pearsonr

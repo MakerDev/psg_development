@@ -1,6 +1,5 @@
 import os
 import argparse
-import random
 import pickle
 import natsort
 import numpy as np
@@ -10,6 +9,7 @@ import torch.nn as nn
 from utils.transforms import build_transforms
 from utils.tools import load_edf_file, save_arousal_xml
 from models import DeepSleepNetSota, DeepSleepNet2
+from common.seed import set_seed
 
 class OnTheFlyTestArousalDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir, file_list, num_channels, transforms = None, eval=False):
@@ -108,12 +108,7 @@ if __name__ == '__main__':
     parser.add_argument('--tag', type=str, default='')
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    set_seed(args.seed)
 
     edf_dir = "/home/honeynaps/data/dataset2/EDF"
     save_dir = "/home/honeynaps/data/dataset2/EBX/AROUS_PRED"

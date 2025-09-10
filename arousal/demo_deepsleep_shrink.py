@@ -1,6 +1,5 @@
 import os
 import argparse
-import random
 import pickle
 import natsort
 import numpy as np
@@ -11,11 +10,12 @@ from utils.transforms import build_transforms
 from utils.tools import load_edf_file, save_arousal_xml, load_edf_only
 
 from models.DeepSleepNet2 import DeepSleepNet2
+from common.seed import set_seed
 from models.DeepSleepSota import DeepSleepNetSota
 from prep_arousal_ver3 import moving_window_mean_rms_norm
 from prep_arousal_ver2 import prep_psg_signal
 from datetime import datetime
-from utils.eval_helper import event_level_analysis
+from common.eval_utils import event_level_analysis
 
 def str2bool(v):
     """문자열 형태의 인자를 bool 값으로 변환하기 위한 헬퍼 함수"""
@@ -91,12 +91,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    set_seed(args.seed)
 
     save_dir = args.dest  #"/home/honeynaps/data/shared/arousal"
 

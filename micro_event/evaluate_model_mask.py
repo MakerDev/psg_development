@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-import random
 import os
 
 from models.crop_models import REDv2Time
@@ -12,7 +11,8 @@ from datasets.dataset_hn_mc import SleepEventDatasetEBXMC
 from sklearn.metrics import precision_recall_curve, average_precision_score, precision_recall_fscore_support
 from losses import masked_focal_loss, CustomASLLossBinary
 from postprocess.postprocessor import evaluate_edf, merge_and_prune
-from util.eval_helper import event_level_analysis
+from common.eval_utils import event_level_analysis
+from common.seed import set_seed
 from util.tools import save_micro_events_by_channels, save_micro_events_by_channels_and_type
 
 def str2bool(v):
@@ -129,11 +129,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    set_seed(args.seed)
 
     data_dir = "/home/honeynaps/data/HN_DATA_MW"
     subjects = os.listdir(data_dir + "/" + "EDF2")

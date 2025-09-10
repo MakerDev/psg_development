@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from models.DeepSleepSota2D import DeepSleepSota2D
 from models.DeepSleepAttn2D import *
-from utils.eval_helper import event_level_analysis
+from common.eval_utils import event_level_analysis
 from utils.tools import load_edf_file, save_arousal_xml, load_edf_only
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import copy
