@@ -229,6 +229,10 @@ if __name__ == '__main__':
     parser.add_argument('--freq_layers', type=int, default=3,
                         help='Number of layers in frequency branch (reduced from 4 to save memory)')
     parser.add_argument('--dropout', type=float, default=0.15, help='Dropout rate')
+    parser.add_argument('--chunk_size', type=int, default=2**17,
+                        help='Chunk size for processing (default 2^17, reduces memory significantly)')
+    parser.add_argument('--chunk_overlap', type=float, default=0.25,
+                        help='Overlap ratio between chunks (default 0.25)')
 
     # Training parameters
     parser.add_argument('--gpu', type=int, default=0, help='GPU device number')
@@ -335,7 +339,9 @@ if __name__ == '__main__':
         time_base_ch=args.time_base_ch,
         freq_base_ch=args.freq_base_ch,
         freq_layers=args.freq_layers,
-        dropout=args.dropout
+        dropout=args.dropout,
+        chunk_size=args.chunk_size,
+        overlap=args.chunk_overlap
     ).to(device)
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")

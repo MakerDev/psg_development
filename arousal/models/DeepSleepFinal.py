@@ -353,8 +353,13 @@ class DeepSleepFinal(nn.Module):
                  time_base_ch=16,
                  freq_base_ch=16,
                  freq_layers=4,
-                 dropout=0.15):
+                 dropout=0.15,
+                 chunk_size=2**17,
+                 overlap=0.25):
         super().__init__()
+
+        self.chunk_size = chunk_size  # Process in chunks to save memory
+        self.overlap = overlap  # Overlap ratio between chunks
 
         # Time branch (1D U-Net)
         self.time_branch = TimeBranchUNet(
@@ -382,30 +387,115 @@ class DeepSleepFinal(nn.Module):
         # Final activation
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x_time, x_freq, apply_sigmoid=True):
-        """
-        Args:
-            x_time: (B, C*6, T) time-domain features
-            x_freq: (B, C, F, T_spec) frequency-domain features
-            apply_sigmoid: whether to apply sigmoid activation
-
-        Returns:
-            out: (B, 1, T) arousal predictions
-        """
+    def _process_chunk(self, x_time_chunk, x_freq_chunk, apply_sigmoid):
+        """Process a single chunk"""
         # Process time features
-        time_feat = self.time_branch(x_time)  # (B, time_base_ch, T)
+        time_feat = self.time_branch(x_time_chunk)
 
         # Process frequency features
-        freq_feat = self.freq_branch(x_freq)  # (B, freq_base_ch, F, T_spec)
+        freq_feat = self.freq_branch(x_freq_chunk)
 
         # Fuse features
-        out = self.fusion(time_feat, freq_feat)  # (B, 1, T)
+        out = self.fusion(time_feat, freq_feat)
 
         # Apply activation
         if apply_sigmoid:
             out = self.sigmoid(out)
 
         return out
+
+    def forward(self, x_time, x_freq, apply_sigmoid=True, use_chunking=True):
+        """
+        Args:
+            x_time: (B, C*6, T) time-domain features
+            x_freq: (B, C, F, T_spec) frequency-domain features
+            apply_sigmoid: whether to apply sigmoid activation
+            use_chunking: whether to use chunking (default True for memory efficiency)
+
+        Returns:
+            out: (B, 1, T) arousal predictions
+        """
+        B, C_time, T = x_time.shape
+        _, C_freq, F, T_spec = x_freq.shape
+
+        # If input is small enough or chunking disabled, process directly
+        if not use_chunking or T <= self.chunk_size:
+            return self._process_chunk(x_time, x_freq, apply_sigmoid)
+
+        # Otherwise, process in overlapping chunks
+        hop_size = int(self.chunk_size * (1 - self.overlap))
+        spec_ratio = T_spec / T  # Spectrogram to time ratio
+
+        # Output tensor
+        outputs = []
+        weights = []
+
+        # Process chunks with overlap
+        start = 0
+        while start < T:
+            end = min(start + self.chunk_size, T)
+
+            # Extract time chunk
+            x_time_chunk = x_time[:, :, start:end]
+
+            # Extract corresponding spectrogram chunk
+            spec_start = int(start * spec_ratio)
+            spec_end = int(end * spec_ratio)
+            x_freq_chunk = x_freq[:, :, :, spec_start:spec_end]
+
+            # Process chunk
+            with torch.cuda.amp.autocast(enabled=False):  # Disable AMP for stability
+                chunk_out = self._process_chunk(x_time_chunk, x_freq_chunk, apply_sigmoid)
+
+            # Pad chunk output to match chunk size if needed
+            chunk_len = chunk_out.shape[2]
+            if chunk_len < (end - start):
+                pad_len = (end - start) - chunk_len
+                chunk_out = F.pad(chunk_out, (0, pad_len), mode='constant', value=0)
+            elif chunk_len > (end - start):
+                chunk_out = chunk_out[:, :, :(end - start)]
+
+            outputs.append(chunk_out)
+
+            # Create weight for blending (linear fade in/out at boundaries)
+            weight = torch.ones(1, 1, chunk_out.shape[2], device=x_time.device)
+            fade_len = int(hop_size * self.overlap)
+
+            if start > 0:  # Fade in at start
+                fade_in = torch.linspace(0, 1, fade_len, device=x_time.device)
+                weight[:, :, :fade_len] = fade_in
+
+            if end < T:  # Fade out at end
+                fade_out = torch.linspace(1, 0, fade_len, device=x_time.device)
+                weight[:, :, -fade_len:] = fade_out
+
+            weights.append(weight)
+
+            # Move to next chunk
+            if end >= T:
+                break
+            start += hop_size
+
+        # Reconstruct full output by blending overlapping chunks
+        output_full = torch.zeros(B, 1, T, device=x_time.device)
+        weight_full = torch.zeros(B, 1, T, device=x_time.device)
+
+        start = 0
+        for chunk_out, weight in zip(outputs, weights):
+            chunk_len = chunk_out.shape[2]
+            end = min(start + chunk_len, T)
+            actual_len = end - start
+
+            output_full[:, :, start:end] += chunk_out[:, :, :actual_len] * weight[:, :, :actual_len]
+            weight_full[:, :, start:end] += weight[:, :, :actual_len]
+
+            start += hop_size
+
+        # Normalize by weight (avoid division by zero)
+        weight_full = torch.clamp(weight_full, min=1e-8)
+        output_full = output_full / weight_full
+
+        return output_full
 
 
 if __name__ == "__main__":

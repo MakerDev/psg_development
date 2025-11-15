@@ -121,6 +121,8 @@ Model Architecture:
 - `--freq_base_ch`: Base channels for frequency branch (default: 8, memory-optimized)
 - `--freq_layers`: Layers in frequency branch (default: 3, memory-optimized)
 - `--dropout`: Dropout rate (default: 0.15)
+- `--chunk_size`: Chunk size for processing (default: 2^17 = ~2.6s, **chunked processing**)
+- `--chunk_overlap`: Overlap ratio between chunks (default: 0.25, smooth boundaries)
 
 Training:
 - `--gpu`: GPU device number (default: 0)
@@ -243,11 +245,16 @@ This is the most common issue with multimodal training. The model uses significa
 
 **Solution hierarchy (try in order):**
 
-1. **Use memory-optimized defaults** (already configured):
+1. **Use memory-optimized defaults with chunking** (already configured):
 ```bash
 python train_deepsleep.py --gpu 0  # Uses optimized defaults
 ```
-Default settings:
+Default settings include:
+- **Chunked Processing**: `chunk_size = 2^17` (~2.6s chunks)
+  - Input is divided into overlapping chunks
+  - Each chunk processed separately
+  - Results blended smoothly using overlap
+  - **Massive memory reduction**: Only processes small chunks at a time
 - `max_time_len = 2^19` (~10 seconds, was 2^21 = 40s)
 - `spec_downsample = 4` (reduces spec memory by 4x)
 - `time_base_ch = 8` (was 16)
@@ -259,10 +266,12 @@ Default settings:
 python train_deepsleep.py --batch_size 1
 ```
 
-3. **Aggressive memory reduction**:
+3. **Aggressive memory reduction** (for GPUs with <16GB):
 ```bash
 python train_deepsleep.py \
     --batch_size 1 \
+    --chunk_size $((2**16)) \
+    --chunk_overlap 0.5 \
     --max_time_len $((2**18)) \
     --spec_downsample 8 \
     --time_base_ch 4 \
@@ -288,10 +297,28 @@ with autocast():
 
 **Memory usage formula:**
 ```
+Without chunking:
 Spectrogram size ≈ max_time_len / (25 * spec_downsample) time bins
-With defaults: 2^19 / (25 * 4) = 5,243 time bins (vs 83,886 before)
-Memory reduction: ~16x smaller
+With defaults: 2^19 / (25 * 4) = 5,243 time bins
+Memory reduction: ~16x smaller vs original
+
+With chunking (KEY FEATURE):
+Active memory ≈ chunk_size / (25 * spec_downsample) time bins
+With defaults: 2^17 / (25 * 4) = 1,311 time bins PER CHUNK
+Memory reduction: ~64x vs original (only 1 chunk in memory at a time)
+
+Example:
+- Original (2^21, no chunking): 83,886 time bins → ~3.1 GB
+- Downsampled (2^19, downsample=4): 5,243 time bins → ~0.2 GB
+- Chunked (chunk_size=2^17): 1,311 time bins/chunk → ~0.05 GB
 ```
+
+**How chunking works:**
+1. Input divided into overlapping chunks (e.g., 2^19 samples → ~4 chunks of 2^17)
+2. Each chunk processed independently through the model
+3. Overlap regions blended using linear fade in/out
+4. Final output reconstructed by stitching chunks
+5. **Result**: Only one small chunk in GPU memory at any time!
 
 ### Data Not Found
 Verify paths in preprocessing script and ensure:
