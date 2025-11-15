@@ -79,7 +79,7 @@ Train the multimodal arousal detection model:
 ```bash
 cd /home/user/psg_development/arousal
 
-# Basic training (with default parameters)
+# Basic training (memory-optimized defaults)
 python train_deepsleep.py \
     --data_dir /path/to/AROUSAL_MULTIMODAL_50_multimodal_v1 \
     --gpu 0
@@ -88,15 +88,28 @@ python train_deepsleep.py \
 python train_deepsleep.py \
     --data_dir /path/to/AROUSAL_MULTIMODAL_50_multimodal_v1 \
     --gpu 0 \
-    --batch_size 4 \
+    --batch_size 2 \
     --lr 1e-4 \
     --num_epochs 100 \
     --loss asl \
     --dropout 0.15 \
-    --time_base_ch 16 \
-    --freq_base_ch 16 \
+    --max_time_len $((2**19)) \
+    --spec_downsample 4 \
+    --time_base_ch 8 \
+    --freq_base_ch 8 \
+    --freq_layers 3 \
     --use_tb True \
     --tag "experiment1"
+
+# If you have more GPU memory (>32GB)
+python train_deepsleep.py \
+    --data_dir /path/to/AROUSAL_MULTIMODAL_50_multimodal_v1 \
+    --gpu 0 \
+    --max_time_len $((2**20)) \
+    --spec_downsample 2 \
+    --time_base_ch 16 \
+    --freq_base_ch 16 \
+    --freq_layers 4
 ```
 
 **Training Parameters:**
@@ -104,9 +117,9 @@ python train_deepsleep.py \
 Model Architecture:
 - `--n_channels`: Number of EEG channels (default: 9)
 - `--n_time_features`: Time-domain features per channel (default: 6)
-- `--time_base_ch`: Base channels for time branch (default: 16)
-- `--freq_base_ch`: Base channels for frequency branch (default: 16)
-- `--freq_layers`: Layers in frequency branch (default: 4)
+- `--time_base_ch`: Base channels for time branch (default: 8, memory-optimized)
+- `--freq_base_ch`: Base channels for frequency branch (default: 8, memory-optimized)
+- `--freq_layers`: Layers in frequency branch (default: 3, memory-optimized)
 - `--dropout`: Dropout rate (default: 0.15)
 
 Training:
@@ -120,7 +133,8 @@ Training:
 Data:
 - `--data_dir`: Path to multimodal data directory
 - `--train_ratio`: Train/validation split (default: 0.8)
-- `--max_time_len`: Maximum time length (default: 2^21)
+- `--max_time_len`: Maximum time length (default: 2^19 = ~10s at 50Hz, memory-optimized)
+- `--spec_downsample`: Spectrogram downsampling factor (default: 4, reduces memory 4x)
 - `--add_noise`: Add noise augmentation (default: True)
 - `--noise_level`: Noise level (default: 0.02)
 
@@ -221,10 +235,62 @@ If you still see this error, check that:
 - All pickle files were created with the same preprocessing parameters
 - The `max_time_len` parameter is set appropriately
 
-### Memory Issues
-Reduce batch size or time length:
+### CUDA Out of Memory (OOM) Error
+This is the most common issue with multimodal training. The model uses significant GPU memory due to:
+- Large spectrogram tensors (e.g., 83,886 time bins for 40s at default settings)
+- U-Net feature maps that grow during downsampling
+- Batch processing
+
+**Solution hierarchy (try in order):**
+
+1. **Use memory-optimized defaults** (already configured):
 ```bash
-python train_deepsleep.py --batch_size 1 --max_time_len $((2**20))
+python train_deepsleep.py --gpu 0  # Uses optimized defaults
+```
+Default settings:
+- `max_time_len = 2^19` (~10 seconds, was 2^21 = 40s)
+- `spec_downsample = 4` (reduces spec memory by 4x)
+- `time_base_ch = 8` (was 16)
+- `freq_base_ch = 8` (was 16)
+- `freq_layers = 3` (was 4)
+
+2. **Further reduce batch size**:
+```bash
+python train_deepsleep.py --batch_size 1
+```
+
+3. **Aggressive memory reduction**:
+```bash
+python train_deepsleep.py \
+    --batch_size 1 \
+    --max_time_len $((2**18)) \
+    --spec_downsample 8 \
+    --time_base_ch 4 \
+    --freq_base_ch 4 \
+    --freq_layers 2
+```
+
+4. **Enable gradient checkpointing** (requires code modification):
+Add to model initialization in train_deepsleep.py:
+```python
+torch.cuda.empty_cache()
+model.gradient_checkpointing_enable()  # If supported
+```
+
+5. **Use mixed precision training**:
+```bash
+# Add to training loop
+from torch.cuda.amp import autocast, GradScaler
+scaler = GradScaler()
+with autocast():
+    y_pred = model(x_time, x_spec)
+```
+
+**Memory usage formula:**
+```
+Spectrogram size ≈ max_time_len / (25 * spec_downsample) time bins
+With defaults: 2^19 / (25 * 4) = 5,243 time bins (vs 83,886 before)
+Memory reduction: ~16x smaller
 ```
 
 ### Data Not Found

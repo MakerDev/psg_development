@@ -46,12 +46,14 @@ class MultimodalArousalDataset(Dataset):
         - y_time: (T,) time-domain labels
         - y_spec: (T_spec,) spectrogram labels
     """
-    def __init__(self, file_paths, max_time_len=2**21, add_noise=True, noise_level=0.02):
+    def __init__(self, file_paths, max_time_len=2**21, add_noise=True, noise_level=0.02,
+                 spec_downsample=4):
         super().__init__()
         self.file_paths = file_paths
         self.max_time_len = max_time_len
         self.add_noise = add_noise
         self.noise_level = noise_level
+        self.spec_downsample = spec_downsample  # Downsample factor for spectrogram
 
     def __len__(self):
         return len(self.file_paths)
@@ -73,10 +75,15 @@ class MultimodalArousalDataset(Dataset):
         # Pad or crop to max_time_len
         x_time, y_time = self._pad_or_crop(x_time, y_time, self.max_time_len)
 
+        # Downsample spectrogram to reduce memory usage
+        # This reduces temporal resolution but keeps frequency info
+        if self.spec_downsample > 1:
+            x_spec = self._downsample_spec(x_spec, self.spec_downsample)
+
         # Pad or crop spectrogram to match time length
-        # Spectrogram time bins should be roughly max_time_len / hop_size
+        # Spectrogram time bins should be roughly max_time_len / (hop_size * downsample)
         # With nperseg=50, noverlap=25, hop_size=25, time_bins ≈ T/25
-        max_spec_time = self.max_time_len // 25  # Approximate spec time bins
+        max_spec_time = self.max_time_len // (25 * self.spec_downsample)
         x_spec = self._pad_or_crop_spec(x_spec, max_spec_time)
 
         # Add noise for augmentation (only during training)
@@ -106,6 +113,28 @@ class MultimodalArousalDataset(Dataset):
             y = y[:target_len]
 
         return x, y
+
+    def _downsample_spec(self, x_spec, factor):
+        """
+        Downsample spectrogram along time axis to reduce memory
+        Args:
+            x_spec: (C, F, T_spec) spectrogram
+            factor: downsampling factor
+        Returns:
+            x_spec_ds: (C, F, T_spec//factor) downsampled spectrogram
+        """
+        if factor <= 1:
+            return x_spec
+
+        C, F, T = x_spec.shape
+        new_T = T // factor
+
+        # Reshape and average over factor
+        # (C, F, T) -> (C, F, new_T, factor) -> (C, F, new_T)
+        x_spec_reshaped = x_spec[:, :, :new_T*factor].reshape(C, F, new_T, factor)
+        x_spec_ds = x_spec_reshaped.mean(axis=3)
+
+        return x_spec_ds
 
     def _pad_or_crop_spec(self, x_spec, target_time_bins):
         """
@@ -193,9 +222,12 @@ if __name__ == '__main__':
     # Model parameters
     parser.add_argument('--n_channels', type=int, default=9, help='Number of EEG channels')
     parser.add_argument('--n_time_features', type=int, default=6, help='Number of time-domain features per channel')
-    parser.add_argument('--time_base_ch', type=int, default=16, help='Base channels for time branch')
-    parser.add_argument('--freq_base_ch', type=int, default=16, help='Base channels for frequency branch')
-    parser.add_argument('--freq_layers', type=int, default=4, help='Number of layers in frequency branch')
+    parser.add_argument('--time_base_ch', type=int, default=8,
+                        help='Base channels for time branch (reduced from 16 to save memory)')
+    parser.add_argument('--freq_base_ch', type=int, default=8,
+                        help='Base channels for frequency branch (reduced from 16 to save memory)')
+    parser.add_argument('--freq_layers', type=int, default=3,
+                        help='Number of layers in frequency branch (reduced from 4 to save memory)')
     parser.add_argument('--dropout', type=float, default=0.15, help='Dropout rate')
 
     # Training parameters
@@ -211,7 +243,10 @@ if __name__ == '__main__':
                         default='/home/honeynaps/data/250718_CND/AROUS_MULTIMODAL/AROUSAL_MULTIMODAL_50_multimodal_v1',
                         help='Directory containing preprocessed multimodal data')
     parser.add_argument('--train_ratio', type=float, default=0.8, help='Train/val split ratio')
-    parser.add_argument('--max_time_len', type=int, default=2**21, help='Maximum time length')
+    parser.add_argument('--max_time_len', type=int, default=2**19,
+                        help='Maximum time length (default 2^19 = ~10s at 50Hz, reduces memory)')
+    parser.add_argument('--spec_downsample', type=int, default=4,
+                        help='Spectrogram downsampling factor to reduce memory (default 4)')
     parser.add_argument('--add_noise', type=str2bool, default=True, help='Add noise augmentation')
     parser.add_argument('--noise_level', type=float, default=0.02, help='Noise level for augmentation')
 
@@ -260,14 +295,16 @@ if __name__ == '__main__':
         train_files,
         max_time_len=args.max_time_len,
         add_noise=args.add_noise,
-        noise_level=args.noise_level
+        noise_level=args.noise_level,
+        spec_downsample=args.spec_downsample
     )
 
     val_dataset = MultimodalArousalDataset(
         val_files,
         max_time_len=args.max_time_len,
         add_noise=False,  # No noise for validation
-        noise_level=0.0
+        noise_level=0.0,
+        spec_downsample=args.spec_downsample
     )
 
     # Create dataloaders
