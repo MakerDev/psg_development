@@ -73,6 +73,12 @@ class MultimodalArousalDataset(Dataset):
         # Pad or crop to max_time_len
         x_time, y_time = self._pad_or_crop(x_time, y_time, self.max_time_len)
 
+        # Pad or crop spectrogram to match time length
+        # Spectrogram time bins should be roughly max_time_len / hop_size
+        # With nperseg=50, noverlap=25, hop_size=25, time_bins ≈ T/25
+        max_spec_time = self.max_time_len // 25  # Approximate spec time bins
+        x_spec = self._pad_or_crop_spec(x_spec, max_spec_time)
+
         # Add noise for augmentation (only during training)
         if self.add_noise:
             noise = np.random.normal(0, self.noise_level, x_time.shape).astype(np.float32)
@@ -100,6 +106,28 @@ class MultimodalArousalDataset(Dataset):
             y = y[:target_len]
 
         return x, y
+
+    def _pad_or_crop_spec(self, x_spec, target_time_bins):
+        """
+        Pad or crop spectrogram to target time bins
+        Args:
+            x_spec: (C, F, T_spec) spectrogram
+            target_time_bins: target number of time bins
+        Returns:
+            x_spec: (C, F, target_time_bins)
+        """
+        current_time_bins = x_spec.shape[2]
+
+        if current_time_bins < target_time_bins:
+            # Pad
+            pad_len = target_time_bins - current_time_bins
+            x_spec = np.pad(x_spec, ((0, 0), (0, 0), (0, pad_len)), mode='constant')
+        elif current_time_bins > target_time_bins:
+            # Crop from center
+            start = (current_time_bins - target_time_bins) // 2
+            x_spec = x_spec[:, :, start:start+target_time_bins]
+
+        return x_spec
 
 
 # ==================== EVALUATION ====================

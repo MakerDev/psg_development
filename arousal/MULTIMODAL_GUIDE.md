@@ -211,6 +211,16 @@ Ensure all dependencies are installed:
 pip install torch torchvision numpy scipy mne scikit-learn
 ```
 
+### RuntimeError: Trying to resize storage that is not resizable
+This error occurs when batch tensors have different shapes. The training script automatically handles this by:
+- Padding/cropping `x_time` to `max_time_len`
+- Padding/cropping `x_spec` to corresponding spectrogram length
+- This ensures all samples in a batch have identical shapes
+
+If you still see this error, check that:
+- All pickle files were created with the same preprocessing parameters
+- The `max_time_len` parameter is set appropriately
+
 ### Memory Issues
 Reduce batch size or time length:
 ```bash
@@ -229,6 +239,12 @@ Try:
 - Adjust learning rate: `--lr 5e-5`
 - Change loss function: `--loss ba_asl`
 - Increase model capacity: `--time_base_ch 32 --freq_base_ch 32`
+
+### Nyquist Frequency Warning
+If you see filter design errors, this is related to the Nyquist frequency limit:
+- At 50Hz sampling, Nyquist frequency = 25Hz
+- Bandpass filters must have upper frequency < 25Hz
+- The code uses 12-24 Hz (safe for 50Hz sampling)
 
 ## Comparison with Previous Approach
 
