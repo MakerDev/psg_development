@@ -162,7 +162,7 @@ arousal/
 3. **Gradient**: Rate of change (first derivative)
 4. **Absolute Amplitude**: |signal|
 5. **Smoothed Envelope**: Low-pass filtered envelope (0.5s window)
-6. **High-Frequency Energy**: Beta/gamma band power (13-30 Hz)
+6. **High-Frequency Energy**: Alpha-beta band power (12-24 Hz, limited by 50Hz Nyquist)
 
 ### Preprocessing Pipeline
 

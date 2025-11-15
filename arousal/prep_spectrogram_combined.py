@@ -75,9 +75,11 @@ def extract_amplitude_features(data, fs=50):
     window_size = int(0.5 * fs)  # 0.5 second window
     smoothed_envelope = uniform_filter1d(envelope, size=window_size, mode='reflect', axis=1)
 
-    # 5. High-frequency energy (beta/gamma band activity)
-    # Use butterworth bandpass filter for beta band (13-30 Hz)
-    sos = butter(4, [13, 30], btype='bandpass', fs=fs, output='sos')
+    # 5. High-frequency energy (alpha-beta band activity)
+    # Use butterworth bandpass filter for alpha-beta band (12-24 Hz)
+    # Note: For fs=50Hz, Nyquist freq is 25Hz, so we use 24Hz as upper bound
+    # This captures arousal-related frequency increases
+    sos = butter(4, [12, 24], btype='bandpass', fs=fs, output='sos')
     hf_filtered = sosfilt(sos, data, axis=1)
     hf_energy = hf_filtered ** 2
     hf_energy_smooth = uniform_filter1d(hf_energy, size=window_size, mode='reflect', axis=1)
