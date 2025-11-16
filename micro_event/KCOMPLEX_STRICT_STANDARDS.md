@@ -27,11 +27,25 @@ min_amplitude = 15 µV   # ❌ 너무 작음!
 ### 3. **Context (맥락) 분석 없음**
 - K-complex **전후의 baseline** activity 체크 안함
 - 주변이 너무 noisy해도 탐지됨
-- Isolated event 여부 검증 안함
+- **CRITICAL**: Isolated event 여부 검증 안함
 
 **결과**: Artifact나 다른 뇌파 활동과 혼동됨
 
-### 4. **Loss Weight 불균형**
+### 4. **❌ N3 Slow Waves와 구분 불가 (CRITICAL!)**
+```
+N3 스테이지 특징:
+- Slow waves (delta waves)가 연속적으로 나타남
+- Biphasic 모양이 K-complex와 유사할 수 있음
+- 하지만 K-complex가 아님!
+
+기존 문제:
+❌ Temporal isolation 체크 없음 → 연속적인 slow waves도 탐지
+❌ Periodicity 체크 없음 → 반복적인 패턴도 탐지
+```
+
+**결과**: **N3에서 엄청난 false positive!**
+
+### 5. **Loss Weight 불균형**
 ```python
 # 기존
 weight_shape = 0.1  # ❌ Shape가 가장 중요한데 너무 낮음!
@@ -86,8 +100,9 @@ min_shape_quality = 0.6  # ✅ 고품질 K-complex만
 - Peak이 명확하고 sharp해야 함
 - Rounded/smooth한 peak는 K-complex가 아님
 
-### 3. Context Analysis (NEW!)
+### 3. Context Analysis (ENHANCED!)
 
+#### a) Baseline Noise Analysis
 ```python
 # 이벤트 전후 1초의 baseline 분석
 baseline_std, baseline_mean = calculate_baseline_noise(
@@ -102,9 +117,46 @@ event_amplitude > 2.0 * baseline_std  # ✅
 baseline_std < 30 µV  # ✅
 ```
 
+#### b) Temporal Isolation (NEW! - CRITICAL)
+```python
+# 앞뒤 3초 내에 similar events가 있는지 확인
+is_isolated, isolation_details = check_temporal_isolation(
+    signal, event_start, event_end, fs,
+    isolation_window_sec=3.0,      # 검사 범위: 3초
+    similarity_threshold=0.7        # Correlation > 0.7이면 similar
+)
+
+# K-complex는 ISOLATED event여야 함
+# 유사한 이벤트가 연속적으로 나타나면 N3 slow waves!
+if not is_isolated:
+    reject("NOT isolated - likely N3 slow waves")
+```
+
 **의미**:
-- K-complex는 상대적으로 **조용한 배경**에서 나타남
-- 주변이 너무 활동적이면 K-complex가 아닐 가능성
+- **N3 slow waves 제거**: 연속적으로 나타나는 biphasic waveform은 K-complex가 아님
+- K-complex는 **독립적인 단일 이벤트**
+- 주변에 비슷한 모양이 반복되면 rejection
+
+#### c) Periodicity Detection (NEW! - CRITICAL)
+```python
+# 주변 10초 내에 반복적인 패턴이 있는지 확인 (autocorrelation)
+is_periodic, periodicity_strength, dominant_period = detect_periodicity(
+    signal, event_start, event_end, fs,
+    analysis_window_sec=10.0,       # 분석 범위: 10초
+    min_period_sec=0.5,             # 최소 주기
+    max_period_sec=3.0              # 최대 주기
+)
+
+# K-complex는 NOT periodic
+# N3 slow waves는 규칙적인 주기를 가짐
+if is_periodic:
+    reject("Periodic pattern - likely N3 slow waves")
+```
+
+**의미**:
+- **Autocorrelation 분석**: 신호가 반복적인 패턴인지 확인
+- **N3 slow waves**: 0.5-2Hz로 규칙적으로 반복됨
+- K-complex: **비주기적**, 가끔 나타나는 isolated event
 
 ### 4. Duration Constraints
 
@@ -175,9 +227,11 @@ K-complex로 인정되려면 **모든** 조건을 만족해야 합니다:
 - [ ] SNR ≥ 2.5
 - [ ] 과도한 slope 없음 (artifact 제거)
 
-### ✅ Context (선택적, 권장)
+### ✅ Context (CRITICAL - 필수!)
 - [ ] Event amplitude > 2.0 × baseline std
 - [ ] Baseline std < 30 µV (조용한 배경)
+- [ ] **Temporal isolation**: 앞뒤 3초 내에 similar events 없음 (NEW!)
+- [ ] **NOT periodic**: 반복적인 패턴이 아님 (N3 slow waves 제거) (NEW!)
 
 ### ✅ Boundary
 - [ ] Zero-crossing points에 정렬
@@ -343,6 +397,38 @@ After (check_context=True):
   - Rejection: "Baseline too noisy: 45µV > 30µV"
 ```
 
+**시나리오 4: N3 Slow Waves (CRITICAL!)**
+```
+Before (no isolation/periodicity check):
+  - N3에서 연속적인 biphasic waves → ✅ 모두 탐지 (❌❌❌ 전부 false positive!)
+  - 예: 10초 동안 5개의 similar waves → 5개 모두 K-complex로 탐지
+
+After (isolation + periodicity check):
+  Step 1: Temporal isolation check
+    - 앞뒤 3초 내에 similar events 발견 (correlation > 0.7)
+    - ❌ 거부: "NOT isolated - 4 similar events nearby"
+
+  Step 2: Periodicity check
+    - Autocorrelation 분석: periodicity_strength = 0.75
+    - Dominant period: 2.0 seconds (0.5Hz slow wave)
+    - ❌ 거부: "Periodic pattern - likely N3 slow waves"
+
+  Result: 5개 중 0개만 남음 (정확함!)
+```
+
+**시나리오 5: 진짜 K-complex (isolated)**
+```
+After all checks:
+  - Amplitude: 120µV ✅
+  - Shape quality: 0.82 ✅
+  - SNR: 3.5 ✅
+  - Baseline std: 12µV ✅
+  - Temporal isolation: 0 similar events ✅
+  - Periodicity: strength = 0.15 (not periodic) ✅
+
+  → ✅ 탐지 (HIGH QUALITY K-complex!)
+```
+
 ### 품질 향상
 
 - **Precision**: ↑↑↑ (False positive 대폭 감소)
@@ -407,14 +493,30 @@ print(f'Validated: {len(events)} K-complexes')
 ### Q2: Recall이 낮아지지 않나?
 **A**: 약한 K-complex를 놓칠 수 있지만, **임상적으로 의미있는** K-complex만 탐지하는 것이 목표. False positive가 더 문제됨.
 
-### Q3: 기존 모델과 호환되나?
+### Q3: N3 slow waves를 어떻게 구분하나?
+**A**: 두 가지 방법:
+1. **Temporal isolation**: 앞뒤 3초 내에 similar events가 있으면 rejection
+2. **Periodicity detection**: Autocorrelation으로 반복 패턴 감지
+
+N3 slow waves는 규칙적이고 연속적이므로 이 체크에서 걸러짐.
+
+### Q4: 기존 모델과 호환되나?
 **A**: 네. `kcomplex_postprocessor_strict.py`는 독립적으로 사용 가능. 기존 모델 출력에도 적용 가능.
 
-### Q4: Shape quality threshold를 조정할 수 있나?
+### Q5: Shape quality threshold를 조정할 수 있나?
 **A**: 네. `min_shape_quality=0.5`로 낮추면 더 많이 탐지, `0.7`로 높이면 더 엄격.
 
-### Q5: Context check를 끌 수 있나?
-**A**: 네. `check_context=False`로 설정. 하지만 권장하지 않음.
+### Q6: Context check를 끌 수 있나?
+**A**: 네. `check_context=False`로 설정. **하지만 강력히 권장하지 않음** - N3 slow waves를 걸러내지 못함!
+
+### Q7: Isolation/Periodicity 체크를 개별적으로 조정할 수 있나?
+**A**: 네. 파라미터 조정 가능:
+- `isolation_window_sec=3.0`: 검사 범위 (기본 3초)
+- `similarity_threshold=0.7`: Correlation 임계값 (기본 0.7)
+- `analysis_window_sec=10.0`: Periodicity 분석 범위 (기본 10초)
+
+더 엄격하게: threshold 낮추기 (0.6)
+더 관대하게: threshold 높이기 (0.8)
 
 ---
 
@@ -464,8 +566,27 @@ refined, events = postprocess_kcomplex_predictions_strict(
 | ✅ Amplitude: 75µV clinical standard | **완료** |
 | ✅ Shape quality validation | **완료** |
 | ✅ Context (baseline) analysis | **완료** |
+| ✅ **Temporal isolation check (N3)** | **완료** ⭐ |
+| ✅ **Periodicity detection (N3)** | **완료** ⭐ |
 | ✅ Loss weights adjustment | **완료** |
 | ✅ Peak prominence & symmetry | **완료** |
 | ✅ Strict validation criteria | **완료** |
 
 **모든 K-complex 특성이 엄격하게 검증됩니다!** 🎯
+
+### 핵심 개선 (N3 Slow Waves 제거)
+
+1. **Temporal Isolation** ⭐
+   - 앞뒤 3초 내에 similar events가 있으면 rejection
+   - Correlation > 0.7이면 "similar"로 판단
+   - **N3의 연속적인 slow waves 제거**
+
+2. **Periodicity Detection** ⭐
+   - Autocorrelation 분석으로 반복 패턴 감지
+   - Periodicity strength > 0.6이면 rejection
+   - **N3의 규칙적인 slow waves 제거**
+
+3. **Combined Effect**
+   - N3 false positives: **대폭 감소** (90%+ 제거 예상)
+   - K-complex precision: **극대화**
+   - Clinically relevant events만 탐지

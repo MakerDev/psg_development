@@ -58,6 +58,152 @@ def calculate_baseline_noise(signal, event_start, event_end, fs=200, window_sec=
     return np.std(baseline), np.mean(baseline)
 
 
+def check_temporal_isolation(signal, event_start, event_end, fs=200,
+                             isolation_window_sec=3.0, similarity_threshold=0.7):
+    """
+    CRITICAL: Check if the event is temporally isolated (not part of repetitive pattern)
+
+    K-complexes MUST be isolated events, not part of continuous slow waves (N3).
+
+    Args:
+        signal: full signal (filtered)
+        event_start, event_end: event boundaries
+        fs: sampling frequency
+        isolation_window_sec: time window to check for similar events (default 3 seconds)
+        similarity_threshold: correlation threshold for "similar" events (default 0.7)
+
+    Returns:
+        is_isolated: bool
+        details: dict with analysis details
+    """
+    event_segment = signal[event_start:event_end]
+    event_duration = (event_end - event_start) / fs
+    window_samples = int(isolation_window_sec * fs)
+
+    # Check before event
+    before_start = max(0, event_start - window_samples)
+    before_segment = signal[before_start:event_start]
+
+    # Check after event
+    after_end = min(len(signal), event_end + window_samples)
+    after_segment = signal[event_end:after_end]
+
+    # Look for similar patterns in before/after segments
+    event_len = len(event_segment)
+
+    def find_similar_patterns(search_segment):
+        """Slide event_segment over search_segment to find correlations"""
+        if len(search_segment) < event_len:
+            return 0, []
+
+        max_correlations = []
+        stride = max(1, event_len // 4)  # Check every quarter of event length
+
+        for i in range(0, len(search_segment) - event_len + 1, stride):
+            candidate = search_segment[i:i + event_len]
+
+            # Normalize both segments
+            event_norm = (event_segment - np.mean(event_segment)) / (np.std(event_segment) + 1e-8)
+            candidate_norm = (candidate - np.mean(candidate)) / (np.std(candidate) + 1e-8)
+
+            # Correlation
+            correlation = np.corrcoef(event_norm, candidate_norm)[0, 1]
+            max_correlations.append(correlation)
+
+        return len([c for c in max_correlations if c > similarity_threshold]), max_correlations
+
+    # Check both directions
+    num_similar_before, corr_before = find_similar_patterns(before_segment)
+    num_similar_after, corr_after = find_similar_patterns(after_segment)
+
+    total_similar = num_similar_before + num_similar_after
+
+    # K-complex should be ISOLATED - no similar events nearby
+    is_isolated = total_similar == 0
+
+    details = {
+        'is_isolated': is_isolated,
+        'similar_events_before': num_similar_before,
+        'similar_events_after': num_similar_after,
+        'total_similar_events': total_similar,
+        'max_correlation_before': max(corr_before) if corr_before else 0,
+        'max_correlation_after': max(corr_after) if corr_after else 0
+    }
+
+    return is_isolated, details
+
+
+def detect_periodicity(signal, event_start, event_end, fs=200,
+                       analysis_window_sec=10.0, min_period_sec=0.5, max_period_sec=3.0):
+    """
+    Detect if the event is part of a periodic pattern (like N3 slow waves)
+
+    K-complexes are NOT periodic. If the signal shows strong periodicity,
+    it's likely slow waves, not K-complexes.
+
+    Args:
+        signal: full signal (filtered)
+        event_start, event_end: event boundaries
+        fs: sampling frequency
+        analysis_window_sec: window for periodicity analysis (default 10 seconds)
+        min_period_sec: minimum period to check (default 0.5s)
+        max_period_sec: maximum period to check (default 3s)
+
+    Returns:
+        is_periodic: bool
+        periodicity_strength: float (0-1, higher = more periodic)
+        dominant_period: float (seconds)
+    """
+    # Expand window around event
+    event_center = (event_start + event_end) // 2
+    window_samples = int(analysis_window_sec * fs)
+    window_start = max(0, event_center - window_samples // 2)
+    window_end = min(len(signal), event_center + window_samples // 2)
+
+    analysis_segment = signal[window_start:window_end]
+
+    if len(analysis_segment) < int(2 * fs):  # Need at least 2 seconds
+        return False, 0.0, 0.0
+
+    # Autocorrelation analysis
+    min_lag = int(min_period_sec * fs)
+    max_lag = int(max_period_sec * fs)
+
+    # Calculate autocorrelation
+    signal_normalized = (analysis_segment - np.mean(analysis_segment)) / (np.std(analysis_segment) + 1e-8)
+
+    autocorr = []
+    lags = range(min_lag, min(max_lag, len(signal_normalized) // 2))
+
+    for lag in lags:
+        if lag >= len(signal_normalized):
+            break
+        corr = np.corrcoef(signal_normalized[:-lag], signal_normalized[lag:])[0, 1]
+        autocorr.append(corr)
+
+    if not autocorr:
+        return False, 0.0, 0.0
+
+    # Find peaks in autocorrelation (indicating periodicity)
+    autocorr_array = np.array(autocorr)
+    peaks, properties = find_peaks(autocorr_array, height=0.3, distance=int(0.5 * fs))
+
+    # Periodicity strength: max autocorrelation value (excluding lag=0)
+    periodicity_strength = np.max(autocorr_array) if len(autocorr_array) > 0 else 0.0
+
+    # If strong autocorrelation found, calculate dominant period
+    if len(peaks) > 0 and periodicity_strength > 0.5:
+        # Dominant period is the first peak
+        dominant_lag = list(lags)[peaks[0]]
+        dominant_period = dominant_lag / fs
+        is_periodic = True
+    else:
+        dominant_period = 0.0
+        is_periodic = periodicity_strength > 0.6  # High threshold for periodicity
+
+    return is_periodic, float(periodicity_strength), float(dominant_period)
+
+
 def calculate_shape_quality(signal, pos_peak_idx, neg_peak_idx, fs=200):
     """
     Calculate shape quality metrics for K-complex
@@ -386,7 +532,60 @@ def validate_kcomplex_event_strict(raw_signal, event_start, event_end, fs=200,
             'max_allowed': max_duration
         }
 
-    # All checks passed - this is a HIGH QUALITY K-complex
+    # 7. CRITICAL: Temporal isolation check (NEW!)
+    # K-complexes MUST be isolated, not part of repetitive patterns (N3 slow waves)
+    if check_context:
+        # Need full filtered signal for isolation check
+        try:
+            nyquist = fs / 2
+            b, a = butter(4, [0.5 / nyquist, 4.0 / nyquist], btype='band')
+            full_filtered = filtfilt(b, a, raw_signal)
+        except:
+            full_filtered = raw_signal
+
+        is_isolated, isolation_details = check_temporal_isolation(
+            full_filtered, event_start, event_end, fs,
+            isolation_window_sec=3.0,
+            similarity_threshold=0.7
+        )
+
+        if not is_isolated:
+            return False, {
+                'reason': 'NOT isolated - similar events nearby (likely N3 slow waves)',
+                'similar_events': isolation_details['total_similar_events'],
+                'similar_before': isolation_details['similar_events_before'],
+                'similar_after': isolation_details['similar_events_after'],
+                'max_correlation': max(
+                    isolation_details['max_correlation_before'],
+                    isolation_details['max_correlation_after']
+                )
+            }
+
+    # 8. CRITICAL: Periodicity detection (NEW!)
+    # K-complexes are NOT periodic (unlike N3 slow waves)
+    if check_context:
+        try:
+            nyquist = fs / 2
+            b, a = butter(4, [0.5 / nyquist, 4.0 / nyquist], btype='band')
+            full_filtered = filtfilt(b, a, raw_signal)
+        except:
+            full_filtered = raw_signal
+
+        is_periodic, periodicity_strength, dominant_period = detect_periodicity(
+            full_filtered, event_start, event_end, fs,
+            analysis_window_sec=10.0,
+            min_period_sec=0.5,
+            max_period_sec=3.0
+        )
+
+        if is_periodic:
+            return False, {
+                'reason': 'Periodic pattern detected (likely N3 slow waves, not K-complex)',
+                'periodicity_strength': periodicity_strength,
+                'dominant_period': dominant_period
+            }
+
+    # All checks passed - this is a HIGH QUALITY, ISOLATED K-complex
     info = {
         'valid': True,
         'snr': snr,
@@ -398,9 +597,19 @@ def validate_kcomplex_event_strict(raw_signal, event_start, event_end, fs=200,
         'peak_info': peak_info
     }
 
-    if check_context and not np.isnan(baseline_std):
-        info['baseline_std'] = baseline_std
-        info['baseline_mean'] = baseline_mean
+    if check_context:
+        if not np.isnan(baseline_std):
+            info['baseline_std'] = baseline_std
+            info['baseline_mean'] = baseline_mean
+
+        # Add isolation info
+        info['is_isolated'] = True
+        info['isolation_details'] = isolation_details
+
+        # Add periodicity info
+        info['is_periodic'] = False
+        info['periodicity_strength'] = periodicity_strength
+        info['dominant_period'] = dominant_period
 
     return True, info
 
