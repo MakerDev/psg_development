@@ -142,12 +142,16 @@ def main():
     parser.add_argument('--use_auxiliary', type=str2bool, default=True, help='Use auxiliary tasks')
     parser.add_argument('--tag', type=str, default='improved', help='Experiment tag')
 
-    # Loss weights
+    # Loss weights (UPDATED for strict K-complex detection)
     parser.add_argument('--weight_detection', type=float, default=1.0, help='Detection loss weight')
-    parser.add_argument('--weight_peak_align', type=float, default=0.3, help='Peak alignment loss weight')
-    parser.add_argument('--weight_peak_order', type=float, default=0.2, help='Peak ordering loss weight')
+    parser.add_argument('--weight_peak_align', type=float, default=0.4, help='Peak alignment loss weight (was 0.3)')
+    parser.add_argument('--weight_peak_order', type=float, default=0.3, help='Peak ordering loss weight (was 0.2)')
     parser.add_argument('--weight_zerocross', type=float, default=0.2, help='Zero-crossing loss weight')
-    parser.add_argument('--weight_shape', type=float, default=0.1, help='Shape consistency loss weight')
+    parser.add_argument('--weight_shape', type=float, default=0.5, help='Shape consistency loss weight (was 0.1 - NOW CRITICAL)')
+
+    # Amplitude thresholds (CLINICAL STANDARDS)
+    parser.add_argument('--min_amplitude', type=float, default=75, help='Minimum K-complex amplitude in µV (clinical standard)')
+    parser.add_argument('--max_amplitude', type=float, default=300, help='Maximum K-complex amplitude in µV')
 
     args = parser.parse_args()
 
@@ -244,16 +248,22 @@ def main():
         weight_peak_order=args.weight_peak_order if args.use_auxiliary else 0.0,
         weight_zerocross=args.weight_zerocross if args.use_auxiliary else 0.0,
         weight_shape=args.weight_shape,
-        fs=200
+        fs=200,
+        min_amplitude=args.min_amplitude,  # STRICT clinical standard
+        max_amplitude=args.max_amplitude
     ).to(device)
 
-    print("Loss function weights:")
-    print(f"  Detection: {args.weight_detection}")
+    print("Loss function configuration:")
+    print("  Weights:")
+    print(f"    Detection: {args.weight_detection}")
     if args.use_auxiliary:
-        print(f"  Peak alignment: {args.weight_peak_align}")
-        print(f"  Peak ordering: {args.weight_peak_order}")
-        print(f"  Zero-crossing: {args.weight_zerocross}")
-    print(f"  Shape consistency: {args.weight_shape}")
+        print(f"    Peak alignment: {args.weight_peak_align}")
+        print(f"    Peak ordering: {args.weight_peak_order}")
+        print(f"    Zero-crossing: {args.weight_zerocross}")
+    print(f"    Shape consistency: {args.weight_shape} (CRITICAL)")
+    print("  Amplitude constraints:")
+    print(f"    Minimum: {args.min_amplitude} µV (clinical standard)")
+    print(f"    Maximum: {args.max_amplitude} µV")
     print()
 
     # Optimizer

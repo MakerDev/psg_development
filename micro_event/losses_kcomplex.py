@@ -195,14 +195,16 @@ def zerocrossing_boundary_loss(zerocross_probs, targets, mask):
     return total_loss / (mask.sum() + 1e-8)
 
 
-def shape_consistency_loss(raw_signal, predictions, targets, mask, fs=200):
+def shape_consistency_loss(raw_signal, predictions, targets, mask, fs=200,
+                           min_amplitude=75, max_amplitude=300):
     """
-    Validate K-complex shape characteristics in predicted events
+    STRICT shape consistency loss with clinical standards
 
-    This loss operates on the original signal and validates:
+    This loss enforces K-complex characteristics:
     1. Correct positive→negative peak pattern
-    2. Appropriate amplitude
+    2. STRICT amplitude: 75-300 µV (clinical standard)
     3. Valid duration
+    4. Peak prominence and balance
 
     Args:
         raw_signal: (batch, 1, time_full) - original EEG at full sampling rate
@@ -210,6 +212,8 @@ def shape_consistency_loss(raw_signal, predictions, targets, mask, fs=200):
         targets: (batch, time_pred) - ground truth labels
         mask: (batch, time_pred) - valid positions
         fs: original sampling frequency
+        min_amplitude: MINIMUM amplitude in µV (default 75)
+        max_amplitude: maximum amplitude in µV (default 300)
     """
     device = raw_signal.device
     B = raw_signal.shape[0]
@@ -274,27 +278,40 @@ def shape_consistency_loss(raw_signal, predictions, targets, mask, fs=200):
             min_idx = filtered.argmin()
 
             # Penalties
-            # 1. Positive peak should come before negative
+            # 1. CRITICAL: Positive peak MUST come before negative
             if max_idx >= min_idx:
-                loss = loss + 1.0
+                loss = loss + 2.0  # HIGHER penalty
                 count += 1
 
-            # 2. Peak-to-peak amplitude should be reasonable (15-250 µV)
+            # 2. STRICT amplitude constraints (75-300 µV)
             amplitude = max_val - min_val
-            if amplitude < 15:
-                loss = loss + (15 - amplitude) / 15
+            if amplitude < min_amplitude:
+                # HEAVY penalty for too-small peaks
+                loss = loss + 2.0 * (min_amplitude - amplitude) / min_amplitude
                 count += 1
-            elif amplitude > 250:
-                loss = loss + (amplitude - 250) / 250
+            elif amplitude > max_amplitude:
+                # Penalty for artifacts
+                loss = loss + (amplitude - max_amplitude) / max_amplitude
                 count += 1
 
-            # 3. Duration should be valid (0.08-0.7 seconds)
+            # 3. Duration should be valid (0.3-1.5 seconds for full event)
             duration = len(segment) / fs
-            if duration < 0.08:
-                loss = loss + (0.08 - duration) / 0.08
+            if duration < 0.3:
+                loss = loss + (0.3 - duration) / 0.3
                 count += 1
-            elif duration > 0.7:
-                loss = loss + (duration - 0.7) / 0.7
+            elif duration > 1.5:
+                loss = loss + (duration - 1.5) / 1.5
+                count += 1
+
+            # 4. NEW: Peak balance (positive and negative should be similar)
+            pos_amplitude = max_val
+            neg_amplitude = abs(min_val)
+            peak_ratio = pos_amplitude / (neg_amplitude + 1e-8)
+
+            # Ideal ratio is around 1.0, penalize if too imbalanced
+            if peak_ratio < 0.3 or peak_ratio > 3.0:
+                imbalance = abs(np.log2(peak_ratio))
+                loss = loss + imbalance
                 count += 1
 
     return loss / (count + 1e-8) if count > 0 else torch.tensor(0.0, device=device)
@@ -302,26 +319,33 @@ def shape_consistency_loss(raw_signal, predictions, targets, mask, fs=200):
 
 class KComplexLoss(nn.Module):
     """
-    Combined loss for K-complex detection
+    STRICT Combined loss for K-complex detection with clinical standards
 
     This loss combines:
     1. Primary task: K-complex detection (focal loss)
-    2. Auxiliary tasks:
+    2. Auxiliary tasks (with HIGHER weights for shape):
        - Peak alignment
        - Peak ordering (pos before neg)
        - Zero-crossing at boundaries
-       - Shape consistency
+       - Shape consistency (CRITICAL - high weight)
+
+    Key changes from relaxed version:
+    - weight_shape: 0.5 (was 0.1) - SHAPE IS CRITICAL
+    - weight_peak_align: 0.4 (was 0.3)
+    - Stricter amplitude thresholds in shape_consistency_loss
     """
 
     def __init__(self,
                  alpha_focal=0.25,
                  gamma_focal=2.0,
                  weight_detection=1.0,
-                 weight_peak_align=0.3,
-                 weight_peak_order=0.2,
+                 weight_peak_align=0.4,    # Increased from 0.3
+                 weight_peak_order=0.3,     # Increased from 0.2
                  weight_zerocross=0.2,
-                 weight_shape=0.1,
-                 fs=200):
+                 weight_shape=0.5,          # SIGNIFICANTLY increased from 0.1
+                 fs=200,
+                 min_amplitude=75,          # STRICT clinical standard
+                 max_amplitude=300):
         super().__init__()
         self.alpha_focal = alpha_focal
         self.gamma_focal = gamma_focal
@@ -331,6 +355,8 @@ class KComplexLoss(nn.Module):
         self.weight_zerocross = weight_zerocross
         self.weight_shape = weight_shape
         self.fs = fs
+        self.min_amplitude = min_amplitude
+        self.max_amplitude = max_amplitude
 
     def forward(self, outputs, targets, mask, raw_signal=None):
         """
@@ -378,13 +404,17 @@ class KComplexLoss(nn.Module):
             total_loss = total_loss + self.weight_zerocross * loss_zerocross
             loss_dict['zerocross'] = loss_zerocross.item()
 
-        # Shape consistency loss (requires raw signal)
+        # Shape consistency loss (requires raw signal) - CRITICAL for K-complex
         if raw_signal is not None and self.weight_shape > 0:
             # Get predictions from logits
             probs = F.softmax(logits, dim=-1)
             predictions = probs[:, :, 1]  # positive class probability
 
-            loss_shape = shape_consistency_loss(raw_signal, predictions, targets, mask, self.fs)
+            loss_shape = shape_consistency_loss(
+                raw_signal, predictions, targets, mask, self.fs,
+                min_amplitude=self.min_amplitude,
+                max_amplitude=self.max_amplitude
+            )
             total_loss = total_loss + self.weight_shape * loss_shape
             loss_dict['shape'] = loss_shape.item()
 
