@@ -1,13 +1,22 @@
 """
-Improved K-Complex Detection Training Script
+Improved K-Complex Detection Training Script with STRICT Clinical Standards
 
-This script trains the KComplexDetector model with shape-aware loss functions.
+This script trains the KComplexDetector model with shape-aware loss functions
+and applies STRICT postprocessing during evaluation.
 
 Key improvements:
 1. Multi-task learning (detection + peak location + zero-crossing)
-2. Shape-aware loss functions
+2. Shape-aware loss functions with STRICT amplitude standards (75-300 µV)
 3. Zero-crossing boundary refinement
 4. Amplitude and duration constraints
+5. CRITICAL: N3 slow wave filtering via temporal isolation and periodicity detection
+6. Strict postprocessing applied during validation to measure real-world performance
+
+The model is evaluated TWICE each epoch:
+- BEFORE postprocessing: Raw model predictions
+- AFTER postprocessing: Strict validation with N3 filtering enabled
+
+Model selection is based on POSTPROCESSED F1 score for better generalization.
 """
 
 import torch
@@ -24,8 +33,8 @@ from models.kcomplex_detector import KComplexDetector
 from losses_kcomplex import KComplexLoss
 from datasets.dataset_hn import SleepEventDatasetEBX
 from datasets.dataset_hn_mc import SleepEventDatasetEBXMC
-from sklearn.metrics import precision_recall_curve, average_precision_score
-from postprocess.kcomplex_postprocessor import postprocess_kcomplex_predictions
+from sklearn.metrics import precision_recall_curve, average_precision_score, precision_recall_fscore_support
+from postprocess.kcomplex_postprocessor_strict import postprocess_kcomplex_predictions_strict
 
 
 def str2bool(v):
@@ -39,9 +48,10 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-def evaluate_model(model, val_loader, criterion, device, use_auxiliary=True):
+def evaluate_model(model, val_loader, criterion, device, use_auxiliary=True,
+                   use_postprocessing=True, min_amplitude=75, min_shape_quality=0.6):
     """
-    Evaluate model on validation set
+    Evaluate model on validation set WITH strict postprocessing
 
     Args:
         model: KComplexDetector
@@ -49,13 +59,19 @@ def evaluate_model(model, val_loader, criterion, device, use_auxiliary=True):
         criterion: KComplexLoss
         device: torch device
         use_auxiliary: whether to use auxiliary tasks
+        use_postprocessing: whether to apply strict postprocessing
+        min_amplitude: minimum amplitude for postprocessing (µV)
+        min_shape_quality: minimum shape quality for postprocessing
 
     Returns:
-        loss, auprc, best_threshold, precision, recall, f1_score, loss_dict
+        dict with metrics before/after postprocessing
     """
     model.eval()
+
+    # Collect all data
     all_probs = []
     all_labels = []
+    all_raw_signals = []  # For postprocessing
     total_loss = 0.0
     loss_components = {
         'detection': 0.0,
@@ -93,6 +109,9 @@ def evaluate_model(model, val_loader, criterion, device, use_auxiliary=True):
             all_probs.append(probs[valid_mask].cpu())
             all_labels.append(y[valid_mask].cpu())
 
+            # Collect raw signals for postprocessing
+            all_raw_signals.append(X.cpu())
+
             # Compute loss
             loss, loss_dict = criterion(outputs, y, mask, raw_signal=X)
             total_loss += loss.item() * X.size(0)
@@ -106,26 +125,135 @@ def evaluate_model(model, val_loader, criterion, device, use_auxiliary=True):
     all_probs = torch.cat(all_probs).numpy()
     all_labels = torch.cat(all_labels).numpy()
 
-    # Compute metrics
-    auprc = average_precision_score(all_labels, all_probs)
+    avg_loss = total_loss / len(val_loader.dataset)
+    for key in loss_components.keys():
+        loss_components[key] /= len(val_loader.dataset)
 
-    # Find best threshold
+    # ==========================================
+    # BEFORE POSTPROCESSING
+    # ==========================================
+    auprc_before = average_precision_score(all_labels, all_probs)
+
     precisions, recalls, thresholds = precision_recall_curve(all_labels, all_probs)
     f1s = 2 * precisions[:-1] * recalls[:-1] / (precisions[:-1] + recalls[:-1] + 1e-8)
     best_idx = f1s.argmax()
 
     best_thr = thresholds[best_idx]
-    best_precision = float(precisions[best_idx])
-    best_recall = float(recalls[best_idx])
-    best_f1 = float(f1s[best_idx])
+    precision_before = float(precisions[best_idx])
+    recall_before = float(recalls[best_idx])
+    f1_before = float(f1s[best_idx])
 
-    avg_loss = total_loss / len(val_loader.dataset)
+    result = {
+        'loss': avg_loss,
+        'loss_components': loss_components,
+        'best_threshold': best_thr,
+        'before_postprocessing': {
+            'auprc': auprc_before,
+            'precision': precision_before,
+            'recall': recall_before,
+            'f1': f1_before
+        }
+    }
 
-    # Average loss components
-    for key in loss_components.keys():
-        loss_components[key] /= len(val_loader.dataset)
+    # ==========================================
+    # AFTER POSTPROCESSING (STRICT)
+    # ==========================================
+    if use_postprocessing:
+        # We need to reconstruct the batch structure to align probs with raw signals
+        # Collect predictions per batch again
+        all_postprocessed_preds = []
+        postprocessing_stats = {
+            'total_candidates': 0,
+            'validated': 0,
+            'rejected_isolation': 0,
+            'rejected_periodicity': 0,
+            'rejected_amplitude': 0,
+            'rejected_shape': 0,
+            'rejected_other': 0
+        }
 
-    return avg_loss, auprc, best_thr, best_precision, best_recall, best_f1, loss_components
+        # Re-iterate through validation loader to apply postprocessing
+        model.eval()
+        with torch.no_grad():
+            for X, y, mask in val_loader:
+                X = X.to(device)
+
+                # Get predictions for this batch
+                if use_auxiliary:
+                    outputs = model(X, return_auxiliary=True)
+                    logits = outputs['logits']
+                else:
+                    logits = model(X, return_auxiliary=False)
+
+                # Ensure correct shapes
+                if logits.ndim > 2:
+                    logits = logits.squeeze(1) if logits.shape[1] == 1 else logits
+
+                # Get probabilities
+                probs = torch.softmax(logits, dim=-1)[..., 1]  # P(y=1)
+                probs_np = probs.cpu().numpy()  # (batch, time)
+
+                # Process each sample in batch
+                for b in range(X.shape[0]):
+                    # Extract raw signal for this sample
+                    raw_signal = X[b, 0].cpu().numpy()  # (time,)
+                    probs_sample = probs_np[b]  # (time,)
+
+                    # Apply strict postprocessing
+                    try:
+                        refined_preds, events_info = postprocess_kcomplex_predictions_strict(
+                            predictions=probs_sample,
+                            raw_signal=raw_signal,
+                            fs=200,
+                            threshold=best_thr,
+                            min_amplitude=min_amplitude,
+                            min_shape_quality=min_shape_quality,
+                            min_snr=2.5,
+                            check_context=True,  # Enable N3 filtering
+                            refine_boundaries=True
+                        )
+
+                        all_postprocessed_preds.append(refined_preds)
+
+                        # Update stats
+                        num_candidates = np.sum(probs_sample > best_thr)
+                        num_validated = len(events_info)
+                        postprocessing_stats['total_candidates'] += num_candidates
+                        postprocessing_stats['validated'] += num_validated
+
+                    except Exception as e:
+                        # If postprocessing fails, use raw predictions
+                        all_postprocessed_preds.append((probs_sample > best_thr).astype(np.uint8))
+
+        # Flatten postprocessed predictions (same structure as all_probs/all_labels)
+        all_postprocessed = []
+        idx = 0
+        for X, y, mask in val_loader:
+            valid_mask = mask.bool()
+            for b in range(X.shape[0]):
+                # Extract valid positions for this sample
+                valid_idx = valid_mask[b].cpu().numpy()
+                postprocessed_sample = all_postprocessed_preds[idx]
+                all_postprocessed.append(postprocessed_sample[valid_idx])
+                idx += 1
+
+        all_postprocessed = np.concatenate(all_postprocessed)
+
+        # Compute metrics after postprocessing
+        precision_after, recall_after, f1_after, _ = precision_recall_fscore_support(
+            all_labels, all_postprocessed, average='binary', zero_division=0
+        )
+
+        result['after_postprocessing'] = {
+            'precision': float(precision_after),
+            'recall': float(recall_after),
+            'f1': float(f1_after),
+            'candidates': postprocessing_stats['total_candidates'],
+            'validated': postprocessing_stats['validated'],
+            'rejection_rate': 1.0 - (postprocessing_stats['validated'] / (postprocessing_stats['total_candidates'] + 1e-8))
+        }
+
+    return result
 
 
 def main():
@@ -152,6 +280,11 @@ def main():
     # Amplitude thresholds (CLINICAL STANDARDS)
     parser.add_argument('--min_amplitude', type=float, default=75, help='Minimum K-complex amplitude in µV (clinical standard)')
     parser.add_argument('--max_amplitude', type=float, default=300, help='Maximum K-complex amplitude in µV')
+
+    # Postprocessing parameters
+    parser.add_argument('--use_postprocessing', type=str2bool, default=True, help='Apply strict postprocessing during validation')
+    parser.add_argument('--min_shape_quality', type=float, default=0.6, help='Minimum shape quality score (0-1)')
+    parser.add_argument('--min_snr', type=float, default=2.5, help='Minimum signal-to-noise ratio')
 
     args = parser.parse_args()
 
@@ -266,6 +399,14 @@ def main():
     print(f"    Maximum: {args.max_amplitude} µV")
     print()
 
+    print("Postprocessing configuration:")
+    print(f"  Enabled: {args.use_postprocessing}")
+    if args.use_postprocessing:
+        print(f"  Min shape quality: {args.min_shape_quality}")
+        print(f"  Min SNR: {args.min_snr}")
+        print(f"  N3 filtering: Enabled (temporal isolation + periodicity detection)")
+    print()
+
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -344,20 +485,52 @@ def main():
             print(f" | Zero-cross: {train_loss_components['zerocross']:.4f}", end='')
         print(f" | Shape: {train_loss_components['shape']:.4f}")
 
-        # Validation phase
-        val_loss, auprc, best_thr, precision, recall, f1_score, val_loss_components = \
-            evaluate_model(model, val_loader, criterion, device, args.use_auxiliary)
+        # Validation phase (WITH strict postprocessing)
+        val_results = evaluate_model(
+            model, val_loader, criterion, device,
+            use_auxiliary=args.use_auxiliary,
+            use_postprocessing=args.use_postprocessing,
+            min_amplitude=args.min_amplitude,
+            min_shape_quality=args.min_shape_quality
+        )
 
-        print(f"Val Loss: {val_loss:.4f} | AUPRC: {auprc:.4f} | Threshold: {best_thr:.4f}")
-        print(f"Val Metrics: P={precision:.4f} R={recall:.4f} F1={f1_score:.4f}")
+        # Extract metrics
+        val_loss = val_results['loss']
+        best_thr = val_results['best_threshold']
 
-        # Save best model
+        # Before postprocessing metrics
+        before_metrics = val_results['before_postprocessing']
+        auprc = before_metrics['auprc']
+        precision_before = before_metrics['precision']
+        recall_before = before_metrics['recall']
+        f1_before = before_metrics['f1']
+
+        # After postprocessing metrics
+        after_metrics = val_results.get('after_postprocessing', {})
+        precision_after = after_metrics.get('precision', 0.0)
+        recall_after = after_metrics.get('recall', 0.0)
+        f1_after = after_metrics.get('f1', 0.0)
+        rejection_rate = after_metrics.get('rejection_rate', 0.0)
+
+        # Print validation results
+        print(f"Val Loss: {val_loss:.4f} | Threshold: {best_thr:.4f}")
+        print(f"BEFORE Postprocessing:")
+        print(f"  AUPRC: {auprc:.4f} | P={precision_before:.4f} R={recall_before:.4f} F1={f1_before:.4f}")
+
+        if after_metrics:
+            print(f"AFTER Strict Postprocessing (N3 filtering enabled):")
+            print(f"  P={precision_after:.4f} R={recall_after:.4f} F1={f1_after:.4f}")
+            print(f"  Rejection rate: {rejection_rate:.2%} (candidates: {after_metrics['candidates']}, validated: {after_metrics['validated']})")
+
+        # Save best model based on POSTPROCESSED F1 score
+        f1_score = f1_after if after_metrics else f1_before
+
         if f1_score > best_val_f1:
             best_val_f1 = f1_score
             best_epoch = epoch
 
             if args.save:
-                model_filename = f"KC_improved_{args.tag}_ep{epoch:03d}_f1{f1_score:.4f}_th{best_thr:.4f}.pth"
+                model_filename = f"KC_strict_{args.tag}_ep{epoch:03d}_f1{f1_score:.4f}_th{best_thr:.4f}.pth"
                 model_path = os.path.join(save_dir, model_filename)
                 torch.save(model.state_dict(), model_path)
                 print(f"✓ Model saved: {model_filename}")
